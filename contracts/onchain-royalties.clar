@@ -244,3 +244,99 @@
     (ok (/ (* price royalty-percentages (get total-sales work)) u100))
   )
 )
+
+
+
+(define-constant err-not-owner (err u108))
+
+(define-map artwork-owners
+  { work-id: uint }
+  { owner: principal }
+)
+
+(define-public (secondary-market-sale (work-id uint) (price uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) err-not-found))
+      (current-owner (unwrap! (map-get? artwork-owners { work-id: work-id }) err-not-found))
+      (royalty-amount (/ (* price (get royalty-percentage work)) u100))
+      (seller-amount (- price royalty-amount))
+      (artist (unwrap! (map-get? artists { artist-id: (get artist-id work) }) err-not-found))
+      (new-sale-id (+ (var-get last-sale-id) u1))
+    )
+    (asserts! (is-eq tx-sender (get owner current-owner)) err-not-owner)
+    (asserts! (> price u0) err-zero-amount)
+    
+    (try! (stx-transfer? seller-amount tx-sender (get owner current-owner)))
+    (try! (stx-transfer? royalty-amount tx-sender (get address artist)))
+    
+    (map-set artwork-owners
+      { work-id: work-id }
+      { owner: tx-sender }
+    )
+    
+    (var-set last-sale-id new-sale-id)
+    (map-set sales
+      { sale-id: new-sale-id }
+      {
+        work-id: work-id,
+        buyer: tx-sender,
+        amount: price,
+        timestamp: stacks-block-height
+      }
+    )
+    (ok new-sale-id)
+  )
+)
+
+
+
+(define-constant err-invalid-duration (err u109))
+(define-constant err-promo-expired (err u110))
+
+(define-map promotional-prices
+  { work-id: uint }
+  {
+    promo-price: uint,
+    end-block: uint
+  }
+)
+
+(define-public (set-promotional-price (work-id uint) (promo-price uint) (duration uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) err-not-found))
+      (artist (unwrap! (map-get? artists { artist-id: (get artist-id work) }) err-not-found))
+      (end-block (+ stacks-block-height duration))
+    )
+    (asserts! (is-eq tx-sender (get address artist)) err-unauthorized)
+    (asserts! (> duration u0) err-invalid-duration)
+    (asserts! (< promo-price (get price work)) err-invalid-percentage)
+    
+    (map-set promotional-prices
+      { work-id: work-id }
+      {
+        promo-price: promo-price,
+        end-block: end-block
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-current-price (work-id uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) err-not-found))
+      (promo (map-get? promotional-prices { work-id: work-id }))
+    )
+    (if (and
+          (is-some promo)
+          (< stacks-block-height (get end-block (unwrap! promo err-not-found)))
+        )
+      (ok (get promo-price (unwrap! promo err-not-found)))
+      (ok (get price work))
+    )
+  )
+)
+
