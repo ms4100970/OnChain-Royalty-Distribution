@@ -340,3 +340,101 @@
   )
 )
 
+(define-constant err-empty-batch (err u111))
+(define-constant err-batch-too-large (err u112))
+(define-constant max-batch-size u10)
+
+(define-map batch-purchases
+  { batch-id: uint }
+  {
+    buyer: principal,
+    work-ids: (list 10 uint),
+    total-amount: uint,
+    timestamp: uint
+  }
+)
+
+(define-data-var last-batch-id uint u0)
+
+(define-private (calculate-work-price (work-id uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) err-not-found))
+      (promo (map-get? promotional-prices { work-id: work-id }))
+    )
+    (if (and
+          (is-some promo)
+          (< stacks-block-height (get end-block (unwrap! promo err-not-found)))
+        )
+      (ok (get promo-price (unwrap! promo err-not-found)))
+      (ok (get price work))
+    )
+  )
+)
+
+(define-private (sum-prices (work-ids (list 10 uint)))
+  (fold + (map get-work-price work-ids) u0)
+)
+
+(define-private (get-work-price (work-id uint))
+  (unwrap-panic (calculate-work-price work-id))
+)
+
+(define-private (process-single-purchase (work-id uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) err-not-found))
+      (current-price (unwrap! (calculate-work-price work-id) err-not-found))
+      (artist-id (get artist-id work))
+      (artist (unwrap! (map-get? artists { artist-id: artist-id }) err-not-found))
+    )
+    (asserts! (get active work) err-not-found)
+    (asserts! (> current-price u0) err-zero-amount)
+    
+    (try! (stx-transfer? current-price tx-sender (get address artist)))
+    
+    (map-set works
+      { work-id: work-id }
+      (merge work { total-sales: (+ (get total-sales work) u1) })
+    )
+    
+    (map-set artwork-owners
+      { work-id: work-id }
+      { owner: tx-sender }
+    )
+    
+    (ok work-id)
+  )
+)
+
+(define-public (batch-purchase (work-ids (list 10 uint)))
+  (let
+    (
+      (batch-length (len work-ids))
+      (new-batch-id (+ (var-get last-batch-id) u1))
+      (total-price (sum-prices work-ids))
+    )
+    (asserts! (> batch-length u0) err-empty-batch)
+    (asserts! (<= batch-length max-batch-size) err-batch-too-large)
+    
+    (map process-single-purchase work-ids)
+    
+    (var-set last-batch-id new-batch-id)
+    (map-set batch-purchases
+      { batch-id: new-batch-id }
+      {
+        buyer: tx-sender,
+        work-ids: work-ids,
+        total-amount: total-price,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (ok new-batch-id)
+  )
+)
+
+(define-read-only (get-batch-purchase (batch-id uint))
+  (map-get? batch-purchases { batch-id: batch-id })
+)
+
